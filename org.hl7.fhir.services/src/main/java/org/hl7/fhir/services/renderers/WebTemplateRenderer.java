@@ -87,6 +87,30 @@ public class WebTemplateRenderer extends ResourceRenderer {
   /** Relative column widths (%): Name, Card., Description, Type, Inputs. */
   private static final String[] COLUMN_WIDTHS = {"41%", "4%", "22%", "11%", "22%"};
 
+  private static final String ICON_HINT_ARCHETYPE_ROOT = "Archetype root";
+  private static final String ICON_HINT_RM_ATTRIBUTE = "RM attribute";
+  private static final String ICON_HINT_ARCHETYPE_NODE = "Archetype node";
+
+  /**
+   * Recolours the (green) node icon by kind, without needing extra image files:
+   * archetype roots orange, RM attributes blue, other archetype nodes stay green.
+   */
+  private void colourIcon(XhtmlNode td) {
+    for (XhtmlNode c : td.getChildNodes()) {
+      if ("img".equals(c.getName()) && c.getAttribute("src") != null && c.getAttribute("src").endsWith("icon_vd_view.png")) {
+        String hint = c.getAttribute("title");
+        if (ICON_HINT_ARCHETYPE_ROOT.equals(hint)) {
+          addStyle(c, ICON_FILTER_ORANGE);
+        } else if (ICON_HINT_RM_ATTRIBUTE.equals(hint)) {
+          addStyle(c, ICON_FILTER_BLUE);
+        }
+      }
+    }
+  }
+
+  private static final String ICON_FILTER_ORANGE = "filter: sepia(1) saturate(4) hue-rotate(-15deg)";
+  private static final String ICON_FILTER_BLUE = "filter: hue-rotate(100deg) saturate(1.3)";
+
   /** Width in px of the tree images the table generator puts in front of each name. */
   private static final int TREE_IMAGE_WIDTH = 16;
 
@@ -113,6 +137,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
       }
     }
     if ("td".equals(node.getName()) && node.hasAttribute("role", "rowheader")) {
+      colourIcon(node);
       wrapName(node);
       return;
     }
@@ -242,9 +267,17 @@ public class WebTemplateRenderer extends ResourceRenderer {
     Row r = gen.new Row();
     rows.add(r);
 
-    r.setIcon("icon_vd_view.png", context.formatPhrase(RenderingI18nContext.QUEST_ROOT));
     // Name [archetype_id/nodeId], with the AQL path as the hover hint
     String def = (item.primitiveValue("archetype_id") != null ? item.primitiveValue("archetype_id")+"/" : "")+(item.primitiveValue("nodeId") != null ?item.primitiveValue("nodeId") : "");
+    // The icon's hint says what kind of node this is; the icon is recoloured to match (see colourIcon)
+    String nodeId = item.primitiveValue("nodeId");
+    if (Utilities.noString(def)) {
+      r.setIcon("icon_vd_view.png", ICON_HINT_RM_ATTRIBUTE);
+    } else if (nodeId != null && nodeId.matches("[A-Za-z0-9_]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\\..+\\.v[0-9].*")) {
+      r.setIcon("icon_vd_view.png", ICON_HINT_ARCHETYPE_ROOT);
+    } else {
+      r.setIcon("icon_vd_view.png", ICON_HINT_ARCHETYPE_NODE);
+    }
     String name = item.primitiveValue("name");
     if (Utilities.noString(name)) {
       name = item.primitiveValue("id");
