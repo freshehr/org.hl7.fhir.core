@@ -138,6 +138,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
     if (lastImg < 0) {
       return;
     }
+    continueSiblingLine(td, children);
     XhtmlNode block = new XhtmlNode(NodeType.Element, "span");
     block.setAttribute("style", "display: inline-block; white-space: normal; vertical-align: top; max-width: calc(100% - "+(imgWidth+8)+"px)");
     List<XhtmlNode> moved = new ArrayList<>();
@@ -164,6 +165,55 @@ public class WebTemplateRenderer extends ResourceRenderer {
     }
     children.removeAll(moved);
     td.addChildNode(block);
+  }
+
+  /**
+   * The table generator draws a row's own connector to its next sibling (tbl_vjoin) as a
+   * 22px image, and the cell background only continues the ancestors' lines and the line
+   * down to the row's children. When a name wraps, the row is taller than the image and the
+   * line to the next sibling breaks: draw it down the whole cell, dotted like the others.
+   */
+  private void continueSiblingLine(XhtmlNode td, List<XhtmlNode> children) {
+    int level = 0;
+    for (XhtmlNode c : children) {
+      if (!"img".equals(c.getName()) || c.getAttribute("src") == null) {
+        continue;
+      }
+      String src = c.getAttribute("src");
+      if (src.contains("tbl_vjoin")) {
+        if (src.contains("tbl_vjoin_end")) {
+          return; // last sibling: no line below it
+        }
+        String style = td.getAttribute("style");
+        String bck = null;
+        if (style != null) {
+          for (String part : style.split(";")) {
+            if (part.trim().startsWith("background-image:")) {
+              bck = part.trim().substring("background-image:".length()).trim();
+            }
+          }
+        }
+        int x = 12 + level * TREE_IMAGE_WIDTH; // where the generator draws the line for this level
+        String line = "repeating-linear-gradient(to bottom, #000 0px, #000 1px, transparent 1px, transparent 2px)";
+        StringBuilder b = new StringBuilder();
+        if (style != null) {
+          for (String part : style.split(";")) {
+            if (!Utilities.noString(part.trim()) && !part.trim().startsWith("background-image:")) {
+              b.append(part.trim()).append("; ");
+            }
+          }
+        }
+        b.append("background-image: ").append(line).append(bck != null ? ", "+bck : "");
+        b.append("; background-repeat: no-repeat").append(bck != null ? ", repeat" : "");
+        b.append("; background-position: ").append(x).append("px 0").append(bck != null ? ", 0 0" : "");
+        b.append("; background-size: 1px 100%").append(bck != null ? ", auto" : "");
+        td.setAttribute("style", b.toString());
+        return;
+      }
+      if (!src.contains("tbl_spacer")) {
+        level++;
+      }
+    }
   }
 
   private void addStyle(XhtmlNode node, String style) {
@@ -268,22 +318,39 @@ public class WebTemplateRenderer extends ResourceRenderer {
   private void addInput(HierarchicalTableGenerator gen, Cell cell, ResourceWrapper input, boolean rmAttribute) {
     // Neither the input type nor the RM attribute name (suffix: code, value, magnitude, unit...)
     // is shown: the Type column already gives the RM data type
-    boolean started = false;
+    // Default value on its own line; a coded default is shown as a code phrase with its label
     if (input.has("defaultValue")) {
-      cell.getPieces().add(gen.new Piece(null, (started ? " " : "")+"(=", null));
-      cell.getPieces().add(gen.new Piece(null, input.primitiveValue("defaultValue"), null));
-      cell.getPieces().add(gen.new Piece(null, ")", null));
-      started = true;
+      cell.getPieces().add(gen.new Piece(null, "Default: "+defaultValueText(input), null));
     }
-    if (input.has("validation")) {
-      if (started) {
-        cell.getPieces().add(gen.new Piece(null, ": ", null));
+    // only range and precision are shown (e.g. a time pattern is not)
+    if (input.has("validation") && (input.child("validation").has("range") || input.child("validation").has("precision"))) {
+      if (!atLineStart(cell)) {
+        cell.getPieces().add(gen.new Piece("br"));
       }
       addValidation(gen, cell, input.child("validation"));
     }
     if (input.has("list")) {
       addList(gen, cell, input.children("list"), input.primitiveValue("terminology"), rmAttribute);
     }
+  }
+
+  /**
+   * The default value as shown in the Inputs column: when it is one of the listed codes,
+   * "[terminology::]code | label |" (e.g. "at0146 | Ingredient |"), otherwise the value itself.
+   */
+  private String defaultValueText(ResourceWrapper input) {
+    String value = input.primitiveValue("defaultValue");
+    String terminology = input.primitiveValue("terminology");
+    for (ResourceWrapper item : input.children("list")) {
+      if (value != null && value.equals(item.primitiveValue("value"))) {
+        String label = item.primitiveValue("label");
+        if (Utilities.noString(label) || label.equals(value)) {
+          return value;
+        }
+        return (Utilities.noString(terminology) ? "" : terminology+"::")+value+" | "+label+" |";
+      }
+    }
+    return value;
   }
 
   private boolean atLineStart(Cell cell) {
@@ -354,7 +421,10 @@ public class WebTemplateRenderer extends ResourceRenderer {
     if (openehr && !list.isEmpty()) {
       CodeSystem cs = findOpenehrCodeSystem(list.get(0).primitiveValue("value"));
       if (cs != null) {
-        cell.getPieces().add(gen.new Piece(null, (atLineStart(cell) ? "" : " ")+"from ", null));
+        if (!atLineStart(cell)) {
+          cell.getPieces().add(gen.new Piece("br"));
+        }
+        cell.getPieces().add(gen.new Piece(null, "from ", null));
         cell.getPieces().add(gen.new Piece(cs.getWebPath(), cs.hasTitle() ? cs.getTitle() : cs.getName(), cs.getUrl()));
       }
     }
