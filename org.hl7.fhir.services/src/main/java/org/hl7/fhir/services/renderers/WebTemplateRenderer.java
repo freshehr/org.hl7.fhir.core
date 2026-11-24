@@ -19,12 +19,15 @@ import org.hl7.fhir.services.terminology.ValidationResult;
 import org.hl7.fhir.utilities.i18n.RenderingI18nContext;
 import org.hl7.fhir.utilities.xhtml.HierarchicalTableGenerator;
 import org.hl7.fhir.utilities.xhtml.HierarchicalTableGenerator.Cell;
+import org.hl7.fhir.utilities.xhtml.HierarchicalTableGenerator.Piece;
 import org.hl7.fhir.utilities.xhtml.HierarchicalTableGenerator.Row;
 import org.hl7.fhir.utilities.xhtml.HierarchicalTableGenerator.TableModel;
+import org.hl7.fhir.utilities.xhtml.NodeType;
 import org.hl7.fhir.utilities.xhtml.XhtmlNode;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,10 +78,98 @@ public class WebTemplateRenderer extends ResourceRenderer {
 //      renderSelect(status, gen, row.getSubRows(), vd, select); 
 //    } 
     XhtmlNode xn = gen.generate(model, context.getLocalPrefix(), true, null);
-    x.addChildNode(xn); 
+    setColumnWidths(xn, COLUMN_WIDTHS);
+    x.addChildNode(xn);
  
     
   } 
+
+  /** Relative column widths (%): Name, Card., Description, Type, Inputs. */
+  private static final String[] COLUMN_WIDTHS = {"41%", "4%", "22%", "11%", "22%"};
+
+  /** Width in px of the tree images the table generator puts in front of each name. */
+  private static final int TREE_IMAGE_WIDTH = 16;
+
+  /**
+   * Title widths in the table generator are fixed pixels, which do not scale with the page,
+   * so set percentage widths on the heading cells of the generated table instead.
+   * The hierarchy (Name) column never wraps, so its width would otherwise be set by the
+   * longest indented name: let each name wrap in a block beside the tree images instead.
+   */
+  private void setColumnWidths(XhtmlNode node, String[] widths) {
+    if (node == null) {
+      return;
+    }
+    if ("th".equals(node.getName()) && node.hasAttribute("scope", "col")) {
+      return; // handled by its row
+    }
+    if ("tr".equals(node.getName())) {
+      int i = 0;
+      for (XhtmlNode c : node.getChildNodes()) {
+        if ("th".equals(c.getName()) && i < widths.length) {
+          addStyle(c, "width: "+widths[i]);
+          i++;
+        }
+      }
+    }
+    if ("td".equals(node.getName()) && node.hasAttribute("role", "rowheader")) {
+      wrapName(node);
+      return;
+    }
+    if (node.hasChildren()) {
+      for (XhtmlNode c : node.getChildNodes()) {
+        setColumnWidths(c, widths);
+      }
+    }
+  }
+
+  /** Moves the visible text of a Name cell into an inline block to the right of the tree images. */
+  private void wrapName(XhtmlNode td) {
+    List<XhtmlNode> children = td.getChildNodes();
+    int lastImg = -1;
+    int imgWidth = 0;
+    for (int i = 0; i < children.size(); i++) {
+      XhtmlNode c = children.get(i);
+      if ("img".equals(c.getName())) {
+        lastImg = i;
+        imgWidth += c.getAttribute("src") != null && c.getAttribute("src").endsWith("tbl_spacer.png") ? 1 : TREE_IMAGE_WIDTH;
+      }
+    }
+    if (lastImg < 0) {
+      return;
+    }
+    XhtmlNode block = new XhtmlNode(NodeType.Element, "span");
+    block.setAttribute("style", "display: inline-block; white-space: normal; vertical-align: top; max-width: calc(100% - "+(imgWidth+8)+"px)");
+    List<XhtmlNode> moved = new ArrayList<>();
+    for (int i = lastImg+1; i < children.size(); i++) {
+      XhtmlNode c = children.get(i);
+      String clss = c.getAttribute("class");
+      if (clss != null && clss.contains("sr-only")) {
+        continue; // screen-reader text is positioned out of the flow anyway
+      }
+      if (c.getNodeType() == NodeType.Text && Utilities.noString(c.getContent() == null ? null : c.getContent().trim())) {
+        continue; // keep the space after the icon
+      }
+      moved.add(c);
+    }
+    if (moved.isEmpty()) {
+      return;
+    }
+    for (XhtmlNode c : moved) {
+      // [archetype_id/nodeId] has no spaces: let it break anywhere rather than widen the column
+      if ("span".equals(c.getName()) && c.allText() != null && c.allText().startsWith(" [")) {
+        addStyle(c, "overflow-wrap: anywhere");
+      }
+      block.addChildNode(c);
+    }
+    children.removeAll(moved);
+    td.addChildNode(block);
+  }
+
+  private void addStyle(XhtmlNode node, String style) {
+    String existing = node.getAttribute("style");
+    node.setAttribute("style", (Utilities.noString(existing) ? "" : existing+"; ")+style);
+  }
 
   private Row addItem(HierarchicalTableGenerator gen, List<Row> rows, ResourceWrapper item, String parentRmType, String lang, String defLang) {
     Row r = gen.new Row();
@@ -118,15 +209,24 @@ public class WebTemplateRenderer extends ResourceRenderer {
     addTermBindings(gen, cell, item);
     
     
-    r.getCells().add(gen.new Cell(null, linkForType(item.primitiveValue("rmType")), item.primitiveValue("rmType"), null, null));
+    // generic types (DV_INTERVAL<DV_DURATION>) may break after the "<" so they do not widen the column
+    String rmType = item.primitiveValue("rmType");
+    String typeLink = linkForType(rmType);
+    int lt = rmType == null ? -1 : rmType.indexOf('<');
+    if (lt > 0) {
+      cell = gen.new Cell(null, typeLink, rmType.substring(0, lt+1), null, null);
+      cell.addPiece(gen.new Piece("wbr"));
+      cell.addPiece(gen.new Piece(typeLink, rmType.substring(lt+1), null));
+    } else {
+      cell = gen.new Cell(null, typeLink, rmType, null, null);
+    }
+    r.getCells().add(cell);
     
     cell = gen.new Cell(null, null, null, null, null);
     r.getCells().add(cell);
-    boolean first = true;
     for (ResourceWrapper input : item.children("inputs")) {
-      if (first) {
-        first = false;
-      } else {
+      // inputs that render nothing (e.g. plain text values) add no blank line
+      if (!atLineStart(cell)) {
         cell.getPieces().add(gen.new Piece("br"));
       }
       addInput(gen, cell, input, rmElement != null);
@@ -166,12 +266,9 @@ public class WebTemplateRenderer extends ResourceRenderer {
   }
 
   private void addInput(HierarchicalTableGenerator gen, Cell cell, ResourceWrapper input, boolean rmAttribute) {
-    // The input type is not shown: the Type column already gives the RM data type
+    // Neither the input type nor the RM attribute name (suffix: code, value, magnitude, unit...)
+    // is shown: the Type column already gives the RM data type
     boolean started = false;
-    if (input.has("suffix")) {
-      cell.getPieces().add(gen.new Piece(null, input.primitiveValue("suffix"), null));
-      started = true;
-    }
     if (input.has("defaultValue")) {
       cell.getPieces().add(gen.new Piece(null, (started ? " " : "")+"(=", null));
       cell.getPieces().add(gen.new Piece(null, input.primitiveValue("defaultValue"), null));
@@ -187,6 +284,21 @@ public class WebTemplateRenderer extends ResourceRenderer {
     if (input.has("list")) {
       addList(gen, cell, input.children("list"), input.primitiveValue("terminology"), rmAttribute);
     }
+  }
+
+  private boolean atLineStart(Cell cell) {
+    // a new cell holds an empty text piece, so skip empty pieces when looking back
+    List<Piece> pieces = cell.getPieces();
+    for (int i = pieces.size()-1; i >= 0; i--) {
+      Piece p = pieces.get(i);
+      if ("br".equals(p.getTag())) {
+        return true;
+      }
+      if (p.getTag() != null || !Utilities.noString(p.getText())) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private void addValidation(HierarchicalTableGenerator gen, Cell cell, ResourceWrapper validation) {
@@ -242,7 +354,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
     if (openehr && !list.isEmpty()) {
       CodeSystem cs = findOpenehrCodeSystem(list.get(0).primitiveValue("value"));
       if (cs != null) {
-        cell.getPieces().add(gen.new Piece(null, " from ", null));
+        cell.getPieces().add(gen.new Piece(null, (atLineStart(cell) ? "" : " ")+"from ", null));
         cell.getPieces().add(gen.new Piece(cs.getWebPath(), cs.hasTitle() ? cs.getTitle() : cs.getName(), cs.getUrl()));
       }
     }
@@ -250,7 +362,10 @@ public class WebTemplateRenderer extends ResourceRenderer {
     // (local at-codes have no terminology prefix)
     String prefix = openehr ? "openehr::" : !Utilities.noString(terminology) ? terminology+"::" : "";
     for (ResourceWrapper item : list) {
-      cell.getPieces().add(gen.new Piece("br"));
+      // no leading line break when the list starts the cell
+      if (!atLineStart(cell)) {
+        cell.getPieces().add(gen.new Piece("br"));
+      }
       cell.getPieces().add(gen.new Piece(null, "• ", null));
       String code = item.primitiveValue("value");
       String text = prefix+code+" | "+item.primitiveValue("label")+" |";
