@@ -156,14 +156,31 @@ public class WebTemplateRenderer extends ResourceRenderer {
     if (moved.isEmpty()) {
       return;
     }
+    // The AQL path goes in a pop-up shown on hover (class wt-aql, styled by the IG's CSS)
+    // instead of the native title tooltip, which is slow to appear and cannot be copied.
+    // Hidden inline, so the page shows nothing extra where that CSS is not loaded.
+    String hint = null;
     for (XhtmlNode c : moved) {
       // [archetype_id/nodeId] has no spaces: let it break anywhere rather than widen the column
       if ("span".equals(c.getName()) && c.allText() != null && c.allText().startsWith(" [")) {
         addStyle(c, "overflow-wrap: anywhere");
       }
+      if (c.getAttribute("title") != null) {
+        if (hint == null) {
+          hint = c.getAttribute("title");
+        }
+        c.getAttributes().remove("title");
+      }
       block.addChildNode(c);
     }
     children.removeAll(moved);
+    if (!Utilities.noString(hint)) {
+      block.setAttribute("class", "wt-name");
+      XhtmlNode pop = block.addTag("span");
+      pop.setAttribute("class", "wt-aql");
+      pop.setAttribute("style", "display: none");
+      pop.addText(hint);
+    }
     td.addChildNode(block);
   }
 
