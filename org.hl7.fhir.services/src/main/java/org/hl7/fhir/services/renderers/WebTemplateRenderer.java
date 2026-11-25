@@ -73,7 +73,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
     String lang = context.getLocale() != null ? context.getLocale().getLanguage() : null;
     String defLang = wt.primitiveValue("defaultLanguage");
     // first we add a root for the WebTemplate itself
-    Row row = addItem(gen, model.getRows(), wt.child("tree"), null, lang, defLang);
+    Row row = addItem(gen, model.getRows(), wt.child("tree"), null, null, lang, defLang);
 //    for (ResourceWrapper select : vd.children("select")) { 
 //      renderSelect(status, gen, row.getSubRows(), vd, select); 
 //    } 
@@ -263,7 +263,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
     node.setAttribute("style", (Utilities.noString(existing) ? "" : existing+"; ")+style);
   }
 
-  private Row addItem(HierarchicalTableGenerator gen, List<Row> rows, ResourceWrapper item, String parentRmType, String lang, String defLang) {
+  private Row addItem(HierarchicalTableGenerator gen, List<Row> rows, ResourceWrapper item, String parentRmType, String archetypeId, String lang, String defLang) {
     Row r = gen.new Row();
     rows.add(r);
 
@@ -273,11 +273,15 @@ public class WebTemplateRenderer extends ResourceRenderer {
     String nodeId = item.primitiveValue("nodeId");
     if (Utilities.noString(def)) {
       r.setIcon("icon_vd_view.png", ICON_HINT_RM_ATTRIBUTE);
-    } else if (nodeId != null && nodeId.matches("[A-Za-z0-9_]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\\..+\\.v[0-9].*")) {
+    } else if (nodeId != null && isArchetypeId(nodeId)) {
       r.setIcon("icon_vd_view.png", ICON_HINT_ARCHETYPE_ROOT);
     } else {
       r.setIcon("icon_vd_view.png", ICON_HINT_ARCHETYPE_NODE);
     }
+    // the archetype this node belongs to, and the node's key within it (nodeId, or the RM attribute name)
+    boolean archetypeRoot = nodeId != null && isArchetypeId(nodeId);
+    String archetype = archetypeRoot ? nodeId : archetypeId;
+    String nodeKey = !Utilities.noString(nodeId) && !archetypeRoot ? nodeId : item.primitiveValue("id");
     String name = item.primitiveValue("name");
     if (Utilities.noString(name)) {
       name = item.primitiveValue("id");
@@ -329,12 +333,12 @@ public class WebTemplateRenderer extends ResourceRenderer {
       if (!atLineStart(cell)) {
         cell.getPieces().add(gen.new Piece("br"));
       }
-      addInput(gen, cell, input, rmElement != null);
+      addInput(gen, cell, input, rmElement != null, archetype, nodeKey);
     }
     
     
     for (ResourceWrapper child : item.children("children")) {
-      addItem(gen, r.getSubRows(), child, item.primitiveValue("rmType"), lang, defLang);
+      addItem(gen, r.getSubRows(), child, item.primitiveValue("rmType"), archetype, lang, defLang);
     }
     return r;
   }
@@ -365,7 +369,7 @@ public class WebTemplateRenderer extends ResourceRenderer {
     return byDefault != null ? byDefault : first;
   }
 
-  private void addInput(HierarchicalTableGenerator gen, Cell cell, ResourceWrapper input, boolean rmAttribute) {
+  private void addInput(HierarchicalTableGenerator gen, Cell cell, ResourceWrapper input, boolean rmAttribute, String archetype, String nodeKey) {
     // Neither the input type nor the RM attribute name (suffix: code, value, magnitude, unit...)
     // is shown: the Type column already gives the RM data type
     // Default value on its own line; a coded default is shown as a code phrase with its label
@@ -380,7 +384,8 @@ public class WebTemplateRenderer extends ResourceRenderer {
       addValidation(gen, cell, input.child("validation"));
     }
     if (input.has("list")) {
-      addList(gen, cell, input.children("list"), input.primitiveValue("terminology"), rmAttribute);
+      addList(gen, cell, input.children("list"), input.primitiveValue("terminology"), rmAttribute,
+          input.primitiveValue("suffix"), archetype, nodeKey);
     }
   }
 
@@ -456,7 +461,8 @@ public class WebTemplateRenderer extends ResourceRenderer {
     
   }
 
-  private void addList(HierarchicalTableGenerator gen, Cell cell, List<ResourceWrapper> list, String terminology, boolean rmAttribute) {
+  private void addList(HierarchicalTableGenerator gen, Cell cell, List<ResourceWrapper> list, String terminology, boolean rmAttribute,
+      String suffix, String archetype, String nodeKey) {
     // Codes from the openEHR terminology are unique across all its groups, so each one
     // identifies the openEHR CodeSystem it comes from: link the codes to their concepts.
     // Some exports omit terminology on RM attributes (e.g. ISM_TRANSITION.current_state):
@@ -468,7 +474,16 @@ public class WebTemplateRenderer extends ResourceRenderer {
         openehr = openehr && findOpenehrCodeSystem(item.primitiveValue("value")) != null;
       }
     }
-    if (openehr && !list.isEmpty()) {
+    // A ValueSet for this list (from the archetype, or generated from the WebTemplate): link it
+    ValueSet vs = findListValueSet(list, terminology, openehr, suffix, archetype, nodeKey);
+    if (vs != null) {
+      if (!atLineStart(cell)) {
+        cell.getPieces().add(gen.new Piece("br"));
+      }
+      cell.getPieces().add(gen.new Piece(null, "ValueSet: ", null));
+      cell.getPieces().add(gen.new Piece(vs.getWebPath(), vs.hasTitle() ? vs.getTitle() : vs.getName(), vs.getUrl()));
+    }
+    if (vs == null && openehr && !list.isEmpty()) {
       CodeSystem cs = findOpenehrCodeSystem(list.get(0).primitiveValue("value"));
       if (cs != null) {
         if (!atLineStart(cell)) {
@@ -497,6 +512,149 @@ public class WebTemplateRenderer extends ResourceRenderer {
         cell.getPieces().add(gen.new Piece(null, text, null));
       }
     }
+  }
+
+  private static final String UCUM = "http://unitsofmeasure.org";
+
+  /** WebTemplate terminology ids and their FHIR systems (as scripts/wt_valuesets.py in the IG uses). */
+  private static final Map<String, String> EXTERNAL_SYSTEMS = new HashMap<>();
+  static {
+    EXTERNAL_SYSTEMS.put("SNOMED-CT", "http://snomed.info/sct");
+    EXTERNAL_SYSTEMS.put("SNOMED CT", "http://snomed.info/sct");
+    EXTERNAL_SYSTEMS.put("LOINC", "http://loinc.org");
+    EXTERNAL_SYSTEMS.put("EDQM", "http://standardterms.edqm.eu");
+    EXTERNAL_SYSTEMS.put("ICD10", "http://hl7.org/fhir/sid/icd-10");
+    EXTERNAL_SYSTEMS.put("ICD-10", "http://hl7.org/fhir/sid/icd-10");
+    EXTERNAL_SYSTEMS.put("UCUM", UCUM);
+  }
+
+  private static boolean isArchetypeId(String id) {
+    return id.matches("[A-Za-z0-9_]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\\..+\\.v[0-9].*");
+  }
+
+  private String igCanonical;
+  private boolean igCanonicalSearched;
+
+  /**
+   * The canonical base of this IG's resources. ValueSets cannot be iterated in the publisher's
+   * context, so it is taken from the CodeSystems the publisher makes for archetype nodes
+   * ({canonical}/CodeSystem/openEHR-...).
+   */
+  private String findIgCanonical() {
+    if (!igCanonicalSearched) {
+      igCanonicalSearched = true;
+      for (CodeSystem cs : context.getContext().fetchResourcesByType(CodeSystem.class)) {
+        String url = cs.getUrl();
+        int i = url == null ? -1 : url.indexOf("/CodeSystem/openEHR-");
+        if (i > 0 && !url.startsWith(OPENEHR_CODESYSTEM_PREFIX)) {
+          igCanonical = url.substring(0, i);
+          break;
+        }
+      }
+    }
+    return igCanonical;
+  }
+
+  /**
+   * Finds the ValueSet for this list. The IG Publisher makes {canonical}/ValueSet/{archetype}.{node}
+   * for archetype at-code lists, and scripts/wt_valuesets.py (in the IG) makes the rest, with ids
+   * {archetype}.{node}[.template|.units][-n]. Each candidate is accepted only if it enumerates exactly
+   * this list's codes from the list's system: UCUM for units, the openEHR terminology, the archetype
+   * node's CodeSystem for local at-codes, or the FHIR system of an external terminology.
+   */
+  private ValueSet findListValueSet(List<ResourceWrapper> list, String terminology, boolean openehr, String suffix, String archetype, String nodeKey) {
+    if (list.isEmpty() || archetype == null || nodeKey == null) {
+      return null;
+    }
+    List<String> codes = new ArrayList<>();
+    boolean atCodes = true;
+    for (ResourceWrapper item : list) {
+      String code = item.primitiveValue("value");
+      if (code == null) {
+        return null;
+      }
+      codes.add(code);
+      atCodes = atCodes && code.startsWith("at");
+    }
+    String base = fhirId(archetype.replace('_', '-')+"."+nodeKey);
+    String system;
+    List<String> stems = new ArrayList<>();
+    if ("unit".equals(suffix)) {
+      system = "ucum";
+      stems.add(base+".units");
+    } else if (openehr) {
+      system = "openehr";
+      stems.add(base);
+    } else if (atCodes && (terminology == null || "local".equals(terminology))) {
+      system = "cs:"+base;
+      stems.add(base);
+      stems.add(base+".template");
+    } else if (terminology != null && EXTERNAL_SYSTEMS.containsKey(terminology)) {
+      system = EXTERNAL_SYSTEMS.get(terminology);
+      stems.add(base);
+    } else {
+      return null;
+    }
+    String canonical = findIgCanonical();
+    if (canonical == null) {
+      return null;
+    }
+    String key = listKey(system, codes);
+    for (String stem : stems) {
+      for (int n = 1; n <= 9; n++) {
+        String id = n == 1 ? fhirId(stem) : fhirId(stem).substring(0, Math.min(61, fhirId(stem).length()))+"-"+n;
+        ValueSet vs = context.getContext().fetchResource(ValueSet.class, canonical+"/ValueSet/"+id);
+        if (vs == null) {
+          if (n > 1) {
+            break;
+          }
+          continue;
+        }
+        if (key.equals(valueSetKey(vs))) {
+          return vs;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** The list key of a ValueSet that enumerates codes from one system, or null. */
+  private String valueSetKey(ValueSet vs) {
+    if (!vs.hasCompose() || vs.getCompose().hasExclude() || vs.getCompose().getIncludeList().size() != 1) {
+      return null;
+    }
+    ValueSet.ConceptSetComponent inc = vs.getCompose().getIncludeFirstRep();
+    if (!inc.hasSystem() || inc.hasFilter() || inc.hasValueSet() || inc.getConceptList().isEmpty()) {
+      return null;
+    }
+    List<String> vsCodes = new ArrayList<>();
+    for (ValueSet.ConceptReferenceComponent c : inc.getConceptList()) {
+      vsCodes.add(c.getCode());
+    }
+    return listKey(normaliseSystem(inc.getSystem()), vsCodes);
+  }
+
+  /** As fhir_id in scripts/wt_valuesets.py: invalid characters become '-', at most 64 characters. */
+  private static String fhirId(String s) {
+    String id = s.replaceAll("[^A-Za-z0-9\\-.]", "-");
+    return id.length() > 64 ? id.substring(0, 64) : id;
+  }
+
+  private String normaliseSystem(String system) {
+    if (system.startsWith(OPENEHR_CODESYSTEM_PREFIX)) {
+      return "openehr";
+    }
+    if (UCUM.equals(system)) {
+      return "ucum";
+    }
+    int i = system.indexOf("/CodeSystem/");
+    return i >= 0 ? "cs:"+system.substring(i+"/CodeSystem/".length()) : system;
+  }
+
+  private String listKey(String system, List<String> codes) {
+    List<String> sorted = new ArrayList<>(codes);
+    java.util.Collections.sort(sorted);
+    return system+"|"+String.join("|", sorted);
   }
 
   private Map<String, CodeSystem> openehrCodes;
